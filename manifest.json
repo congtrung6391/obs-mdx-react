@@ -1,9 +1,9 @@
 {
-  "id": "mdxjs",
-  "name": "MDX JS",
+  "id": "mdx-react",
+  "name": "MDX React",
   "version": "1.0.0",
   "minAppVersion": "1.5.0",
-  "description": "Enables interactive MDX rendering using React inside Obsidian.",
+  "description": "Rendering MDX in Obsidian with React runtime.",
   "author": "congtrung6391",
   "authorUrl": "",
   "isDesktopOnly": false

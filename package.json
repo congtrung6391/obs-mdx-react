@@ -1,7 +1,7 @@
 {
-  "name": "obsidian-mdxjs",
+  "name": "obsidian-mdx-react",
   "version": "1.0.0",
-  "description": "Render MDX files with React inside Obsidian.",
+  "description": "Rendering MDX in Obsidian with React runtime.",
   "main": "main.js",
   "scripts": {
     "dev": "esbuild src/main.ts --bundle --external:obsidian --format=cjs --watch --outfile=main.js",
