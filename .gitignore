@@ -1,2 +1,5 @@
 node_modules/
+.cache/
 .DS_Store
+data.json
+main.js

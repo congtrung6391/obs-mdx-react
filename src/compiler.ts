@@ -1,23 +1,10 @@
 import { compile, type CompileOptions } from "@mdx-js/mdx";
-import * as React from "react";
-
-const moduleRegistry: Record<string, string> = {
-  "react": "https://esm.sh/react@18.3.1",
-  "react-dom": "https://esm.sh/react-dom@18.3.1",
-  "react-dom/client": "https://esm.sh/react-dom@18.3.1/client",
-  "react/jsx-runtime": "https://esm.sh/react@18.3.1/jsx-runtime",
-};
+import type * as React from "react";
 
 /**
  * Resolves global pre-bundled packages or falls back to CDN.
  */
 export function resolveGlobalOrCdn(source: string): Promise<unknown> | unknown {
-  if (source in moduleRegistry) {
-    const url = moduleRegistry[source];
-    // Exception: Dynamic import is required here because React CDN packages must be loaded at runtime.
-    return import(url);
-  }
-
   // Fallback to esm.sh for external npm packages
   const url = `https://esm.sh/${source}`;
   // Exception: Dynamic import is required here because external package URLs must be loaded at runtime.

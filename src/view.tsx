@@ -1,8 +1,77 @@
 import { App, FileView, WorkspaceLeaf, TFile, normalizePath, getFrontMatterInfo, parseYaml, requestUrl } from "obsidian";
-import * as React from "react";
-import * as ReactDOM from "react-dom/client";
+import type * as ReactType from "react";
+import type * as ReactDOMType from "react-dom/client";
+
 import { compileMdx, resolveGlobalOrCdn } from "./compiler";
+import { isDependencyCached, getCachedDependencyUrl } from "./cache";
 import type MdxPlugin from "./main";
+
+let React: typeof ReactType;
+let ReactDOM: typeof ReactDOMType;
+let jsxRuntime: any;
+let MdxErrorBoundary: any;
+
+export async function loadReact(app: App) {
+  if (!React || !ReactDOM) {
+    try {
+      React = await import("react");
+      ReactDOM = await import("react-dom/client");
+      try {
+        jsxRuntime = await import("react/jsx-runtime");
+      } catch (e) {
+        console.warn("MDX Viewer: react/jsx-runtime was not mapped or failed to load", e);
+      }
+    } catch (e) {
+      console.warn("MDX Viewer: Failed to import react via specifier, trying absolute cache path fallback", e);
+      try {
+        const reactUrl = getCachedDependencyUrl(app, "react", "18.3.1");
+        const reactDomUrl = getCachedDependencyUrl(app, "react-dom/client", "18.3.1");
+        React = await import(reactUrl);
+        ReactDOM = await import(reactDomUrl);
+        try {
+          const jsxRuntimeUrl = getCachedDependencyUrl(app, "react/jsx-runtime", "18.3.1");
+          jsxRuntime = await import(jsxRuntimeUrl);
+        } catch (e2) {
+          console.warn("MDX Viewer: react/jsx-runtime fallback failed", e2);
+        }
+      } catch (fallbackErr) {
+        console.error("MDX Viewer: Critical error - failed to load React from cache", fallbackErr);
+        throw fallbackErr;
+      }
+    }
+    MdxErrorBoundary = class extends React.Component<{ children: ReactType.ReactNode }, ErrorBoundaryState> {
+      constructor(props: { children: ReactType.ReactNode }) {
+        super(props);
+        this.state = { hasError: false, error: null };
+      }
+
+      static getDerivedStateFromError(error: Error): ErrorBoundaryState {
+        return { hasError: true, error };
+      }
+
+      componentDidCatch(error: Error, errorInfo: ReactType.ErrorInfo): void {
+        console.error("MDX Render Error:", error, errorInfo);
+      }
+
+      render(): ReactType.ReactNode {
+        if (this.state.hasError) {
+          return (
+            React.createElement("div", { className: "mdx-error-container", style: { padding: "20px", color: "var(--text-error)" } },
+              React.createElement("h3", null, "MDX Render Error"),
+              React.createElement("pre", { style: { whiteSpace: "pre-wrap" } },
+                this.state.error ? this.state.error.message : "Unknown rendering error"
+              ),
+              React.createElement("pre", { style: { whiteSpace: "pre-wrap", fontSize: "11px", color: "var(--text-muted)" } },
+                this.state.error?.stack
+              )
+            )
+          );
+        }
+        return this.props.children;
+      }
+    };
+  }
+}
 
 export const VIEW_TYPE_MDX = "mdx-js-view";
 
@@ -42,41 +111,9 @@ interface ErrorBoundaryState {
   error: Error | null;
 }
 
-class MdxErrorBoundary extends React.Component<{ children: React.ReactNode }, ErrorBoundaryState> {
-  constructor(props: { children: React.ReactNode }) {
-    super(props);
-    this.state = { hasError: false, error: null };
-  }
-
-  static getDerivedStateFromError(error: Error): ErrorBoundaryState {
-    return { hasError: true, error };
-  }
-
-  componentDidCatch(error: Error, errorInfo: React.ErrorInfo): void {
-    console.error("MDX Render Error:", error, errorInfo);
-  }
-
-  render(): React.ReactNode {
-    if (this.state.hasError) {
-      return (
-        <div className="mdx-error-container" style={{ padding: "20px", color: "var(--text-error)" }}>
-          <h3>MDX Render Error</h3>
-          <pre style={{ whiteSpace: "pre-wrap" }}>
-            {this.state.error ? this.state.error.message : "Unknown rendering error"}
-          </pre>
-          <pre style={{ whiteSpace: "pre-wrap", fontSize: "11px", color: "var(--text-muted)" }}>
-            {this.state.error?.stack}
-          </pre>
-        </div>
-      );
-    }
-
-    return this.props.children;
-  }
-}
 
 export class MdxView extends FileView {
-  private root: ReactDOM.Root | null = null;
+  private root: any = null;
   private container: HTMLDivElement | null = null;
   private targetContainer: HTMLElement | ShadowRoot | null = null;
 
@@ -86,7 +123,7 @@ export class MdxView extends FileView {
     super(leaf);
     this.plugin = plugin;
   }
-  async loadPlugins(pluginsList: unknown[], isRemark: boolean): Promise<unknown[]> {
+  async loadPlugins(pluginsList: unknown[], isRemark: boolean, customDeps: Record<string, string> = {}): Promise<unknown[]> {
     const loaded = await Promise.all(
       pluginsList.map(async (item) => {
         let name = "";
@@ -113,7 +150,41 @@ export class MdxView extends FileView {
         if (!name) return null;
 
         try {
-          const url = resolvePluginUrl(name, this.file, this.app);
+          let pkgName = name;
+          let pkgVersion = "";
+          
+          if (name.includes("@")) {
+            const parts = name.split("@");
+            if (name.startsWith("@")) {
+              if (parts.length > 2) {
+                pkgName = "@" + parts[1];
+                pkgVersion = parts[2];
+              }
+            } else {
+              if (parts.length > 1) {
+                pkgName = parts[0];
+                pkgVersion = parts[1];
+              }
+            }
+          }
+
+          if (!pkgVersion) {
+            pkgVersion = customDeps[pkgName] || this.plugin.settings.dependencies[pkgName] || "";
+            if (!pkgVersion && pkgName === "remark-frontmatter") {
+              pkgVersion = "5.0.0";
+            }
+          }
+
+          let url = "";
+          if (pkgVersion && !pkgVersion.startsWith("http://") && !pkgVersion.startsWith("https://")) {
+            if (await isDependencyCached(this.app, pkgName, pkgVersion)) {
+              url = getCachedDependencyUrl(this.app, pkgName, pkgVersion);
+            }
+          }
+
+          if (!url) {
+            url = resolvePluginUrl(name, this.file, this.app);
+          }
           // Exception: Dynamic import is required here because plugin packages are runtime-configured by the user.
           const module = await import(url);
           
@@ -180,6 +251,7 @@ export class MdxView extends FileView {
   }
 
   async onLoadFile(file: TFile): Promise<void> {
+    await loadReact(this.app);
     await super.onLoadFile(file);
     this.contentEl.addClass("markdown-reading-view");
     this.contentEl.empty();
@@ -228,28 +300,64 @@ export class MdxView extends FileView {
 
       const remarkFrontmatter = frontmatter.remarkPlugins;
       const remarkPluginsList: unknown[] = Array.isArray(remarkFrontmatter)
-        ? remarkFrontmatter
-        : (this.plugin.settings.remarkPluginsList || "")
-            .split(",")
-            .map(x => x.trim())
-            .filter(Boolean);
+        ? [...remarkFrontmatter]
+        : (this.plugin.settings.remarkPlugins || []).map(p => {
+            if (p.options && p.options.trim()) {
+              try {
+                const opts = JSON.parse(p.options);
+                return [p.name + "@" + p.version, opts];
+              } catch (e) {
+                console.warn(`MDX Viewer: Failed to parse options JSON for plugin "${p.name}"`, e);
+              }
+            }
+            return p.name + "@" + p.version;
+          });
+
+      // Ensure remark-frontmatter is always included in the list of remark plugins
+      if (!remarkPluginsList.some(p => {
+        if (typeof p === "string") {
+          return p === "remark-frontmatter" || p.startsWith("remark-frontmatter@");
+        }
+        if (Array.isArray(p) && typeof p[0] === "string") {
+          return p[0] === "remark-frontmatter" || p[0].startsWith("remark-frontmatter@");
+        }
+        return false;
+      })) {
+        remarkPluginsList.unshift("remark-frontmatter");
+      }
 
       const rehypeFrontmatter = frontmatter.rehypePlugins;
       const rehypePluginsList: unknown[] = Array.isArray(rehypeFrontmatter)
-        ? rehypeFrontmatter
-        : (this.plugin.settings.rehypePluginsList || "")
-            .split(",")
-            .map(x => x.trim())
-            .filter(Boolean);
-
+        ? [...rehypeFrontmatter]
+        : (this.plugin.settings.rehypePlugins || []).map(p => {
+            if (p.options && p.options.trim()) {
+              try {
+                const opts = JSON.parse(p.options);
+                return [p.name + "@" + p.version, opts];
+              } catch (e) {
+                console.warn(`MDX Viewer: Failed to parse options JSON for plugin "${p.name}"`, e);
+              }
+            }
+            return p.name + "@" + p.version;
+          });
       const [remarkPlugins, rehypePlugins] = await Promise.all([
-        this.loadPlugins(remarkPluginsList, true),
-        this.loadPlugins(rehypePluginsList, false)
+        this.loadPlugins(remarkPluginsList, true, customDeps),
+        this.loadPlugins(rehypePluginsList, false, customDeps)
       ]);
 
       const settingsDeps = this.plugin.settings.dependencies || {};
 
       const resolveSource = async (source: string): Promise<unknown> => {
+        if (source === "react") {
+          return React;
+        }
+        if (source === "react-dom" || source === "source/client" || source === "react-dom/client") {
+          return ReactDOM;
+        }
+        if (source === "react/jsx-runtime" && jsxRuntime) {
+          return jsxRuntime;
+        }
+
         // Handle CSS imports globally (both local files and CDN URLs)
         if (source.endsWith(".css")) {
           let cssContent = "";
@@ -291,12 +399,89 @@ export class MdxView extends FileView {
           return await import(source);
         }
 
-        if (source in customDeps) {
-          return await import(customDeps[source]);
-        }
+        const parsePackageAndSubpath = (src: string): { pkgName: string; subpath: string } => {
+          let pkgName = src;
+          let subpath = "";
+          
+          if (src.startsWith("@")) {
+            const parts = src.split("/");
+            if (parts.length > 2) {
+              pkgName = parts[0] + "/" + parts[1];
+              subpath = "/" + parts.slice(2).join("/");
+            }
+          } else {
+            const parts = src.split("/");
+            if (parts.length > 1) {
+              pkgName = parts[0];
+              subpath = "/" + parts.slice(1).join("/");
+            }
+          }
+          return { pkgName, subpath };
+        };
 
-        if (source in settingsDeps) {
-          return await import(settingsDeps[source]);
+        const { pkgName, subpath } = parsePackageAndSubpath(source);
+        const depVersion = customDeps[pkgName] || settingsDeps[pkgName];
+
+        if (depVersion) {
+          if (depVersion.startsWith("http://") || depVersion.startsWith("https://")) {
+            const baseUrl = depVersion.endsWith("/") ? depVersion.slice(0, -1) : depVersion;
+            return await import(baseUrl + subpath);
+          } else {
+            const adapter = this.app.vault.adapter;
+            const cacheKey = `${pkgName.replace(/\//g, "-")}${subpath.replace(/\//g, "-").replace(/\.js$/, "")}@${depVersion}.js`;
+            const cachePath = `.obsidian/plugins/mdx-react/.cache/${cacheKey}`;
+            
+            if (await adapter.exists(cachePath)) {
+              const resourceUrl = (adapter as any).getResourcePath(cachePath).split("?")[0];
+              return await import(resourceUrl);
+            } else {
+              if (subpath === "") {
+                if (await isDependencyCached(this.app, pkgName, depVersion)) {
+                  return await import(getCachedDependencyUrl(this.app, pkgName, depVersion));
+                } else {
+                  return await import(`https://esm.sh/${pkgName}@${depVersion}?bundle&external=react,react-dom`);
+                }
+              } else {
+                try {
+                  const fetchUrl = `https://esm.sh/${pkgName}@${depVersion}${subpath}?bundle&external=react,react-dom`;
+                  const response = await requestUrl(fetchUrl);
+                  if (response.status === 200) {
+                    let code = response.text;
+                    
+                    // Follow esm.sh redirection wrappers (200 OK with export * from "/...")
+                    let redirectMatch = code.match(/export\s+\*\s+from\s*['"](\/.*?)['"]/);
+                    let depth = 0;
+                    while (redirectMatch && depth < 3) {
+                      try {
+                        const targetUrl = `https://esm.sh${redirectMatch[1]}`;
+                        const redirectResponse = await requestUrl(targetUrl);
+                        if (redirectResponse.status === 200) {
+                          code = redirectResponse.text;
+                          redirectMatch = code.match(/export\s+\*\s+from\s*['"](\/.*?)['"]/);
+                          depth++;
+                        } else {
+                          break;
+                        }
+                      } catch (e) {
+                        console.warn("MDX Viewer: Failed to follow esm.sh redirect wrapper", e);
+                        break;
+                      }
+                    }
+                    code = code
+                      .replace(/(from\s*['"])\/node\/(.*?)(['"])/g, '$1https://esm.sh/node/$2$3')
+                      .replace(/(import\(\s*['"])\/node\/(.*?)(['"]\s*\))/g, '$1https://esm.sh/node/$2$3');
+                    
+                    await adapter.write(cachePath, code);
+                    const resourceUrl = (adapter as any).getResourcePath(cachePath).split("?")[0];
+                    return await import(resourceUrl);
+                  }
+                } catch (e) {
+                  console.warn(`MDX Viewer: Failed to fetch and cache subpath "${source}"`, e);
+                }
+                return await import(`https://esm.sh/${pkgName}@${depVersion}${subpath}?bundle&external=react,react-dom`);
+              }
+            }
+          }
         }
 
         if (source.startsWith(".")) {
@@ -304,14 +489,14 @@ export class MdxView extends FileView {
           const resolvedPath = normalizePath(resolveRelativePath(parentPath, source));
           const targetFile = this.app.vault.getAbstractFileByPath(resolvedPath);
           if (targetFile instanceof TFile) {
-            const resourceUrl = this.app.vault.getResourcePath(targetFile);
+            const resourceUrl = this.app.vault.getResourcePath(targetFile).split("?")[0];
             return await import(resourceUrl);
           }
         }
 
         return await resolveGlobalOrCdn(source);
       };
-
+      console.log("React instances match:", (window as any).React === React, "ReactDOM Client instances match:", (window as any).ReactDOMClient === ReactDOM);
       const MDXComponent = await compileMdx(content, resolveSource, remarkPlugins, rehypePlugins);
 
       // 1. Inject Theme Override CSS if active
@@ -346,11 +531,7 @@ export class MdxView extends FileView {
       styleEl.textContent = this.plugin.settings.customCss || "";
 
       if (!this.root) {
-        const reactDomUrl = "https://esm.sh/react-dom@18.3.1/client";
-        const ReactDOMClientCDN = (await import(reactDomUrl)) as unknown as {
-          createRoot: (container: Element) => { render: (node: React.ReactNode) => void };
-        };
-        this.root = ReactDOMClientCDN.createRoot(this.container) as unknown as ReactDOM.Root;
+        this.root = ReactDOM.createRoot(this.container);
       }
 
       this.root.render(

@@ -1,30 +1,74 @@
+
 import { App, Plugin, FileView, TFile } from "obsidian";
 import { MdxView, VIEW_TYPE_MDX } from "./view";
 import { MdxSettingTab } from "./settings";
+import { ensureReactDependenciesInstalled, CORE_REACT_DEPENDENCIES } from "./cache";
+
+export interface MdxPluginConfig {
+  name: string;
+  version: string;
+  options: string;
+}
 
 export interface MdxSettings {
   dependencies: Record<string, string>;
   customCss: string;
   selectedTheme: string;
-  remarkPluginsList: string;
-  rehypePluginsList: string;
+  remarkPlugins: MdxPluginConfig[];
+  rehypePlugins: MdxPluginConfig[];
 }
 
 export const DEFAULT_SETTINGS: MdxSettings = {
   dependencies: {
-    "canvas-confetti": "https://esm.sh/canvas-confetti@1.9.3",
-    "lodash-es": "https://esm.sh/lodash-es@4.17.21"
+    "canvas-confetti": "1.9.3",
+    "lodash-es": "4.17.21",
+    "remark-frontmatter": "5.0.0"
   },
   customCss: "",
   selectedTheme: "",
-  remarkPluginsList: "",
-  rehypePluginsList: ""
+  remarkPlugins: [
+    { name: "remark-frontmatter", version: "5.0.0", options: "" }
+  ],
+  rehypePlugins: []
 };
 
 export default class MdxPlugin extends Plugin {
   declare settings: MdxSettings;
 
   async onload(): Promise<void> {
+    await ensureReactDependenciesInstalled(this.app);
+    
+    // Inject native browser Import Map for react specifiers
+    try {
+      const adapter = this.app.vault.adapter;
+      let importMapEl = document.getElementById("mdx-react-importmap");
+      if (!importMapEl) {
+        const getCleanResourcePath = (path: string): string => {
+          const url = (adapter as any).getResourcePath(path);
+          return url.split("?")[0];
+        };
+        const reactPath = getCleanResourcePath(".obsidian/plugins/mdx-react/.cache/react.js");
+        const reactDomPath = getCleanResourcePath(".obsidian/plugins/mdx-react/.cache/react-dom.js");
+        const reactDomClientPath = getCleanResourcePath(".obsidian/plugins/mdx-react/.cache/react-dom-client.js");
+        const jsxRuntimePath = getCleanResourcePath(".obsidian/plugins/mdx-react/.cache/react-jsx-runtime.js");
+
+        importMapEl = document.createElement("script");
+        importMapEl.id = "mdx-react-importmap";
+        importMapEl.setAttribute("type", "importmap");
+        importMapEl.textContent = JSON.stringify({
+          imports: {
+            "react": reactPath,
+            "react-dom": reactDomPath,
+            "react-dom/client": reactDomClientPath,
+            "react/jsx-runtime": jsxRuntimePath
+          }
+        });
+        document.head.appendChild(importMapEl);
+      }
+    } catch (e) {
+      console.warn("MDX Viewer: Failed to inject Import Map", e);
+    }
+
     await this.loadSettings();
 
     this.registerView(
@@ -92,8 +136,8 @@ export default class MdxPlugin extends Plugin {
     let dependencies = DEFAULT_SETTINGS.dependencies;
     let customCss = DEFAULT_SETTINGS.customCss;
     let selectedTheme = DEFAULT_SETTINGS.selectedTheme;
-    let remarkPluginsList = DEFAULT_SETTINGS.remarkPluginsList;
-    let rehypePluginsList = DEFAULT_SETTINGS.rehypePluginsList;
+    let remarkPlugins = DEFAULT_SETTINGS.remarkPlugins;
+    let rehypePlugins = DEFAULT_SETTINGS.rehypePlugins;
 
     if (data) {
       if (data.dependenciesJson) {
@@ -114,16 +158,33 @@ export default class MdxPlugin extends Plugin {
         selectedTheme = data.selectedTheme;
       }
 
-      if (typeof data.remarkPluginsList === "string") {
-        remarkPluginsList = data.remarkPluginsList;
+      if (Array.isArray(data.remarkPlugins)) {
+        remarkPlugins = data.remarkPlugins;
+      } else if (typeof data.remarkPluginsList === "string" && data.remarkPluginsList.trim()) {
+        remarkPlugins = data.remarkPluginsList
+          .split(",")
+          .map((x: string) => x.trim())
+          .filter(Boolean)
+          .map((name: string) => {
+            if (name === "remark-frontmatter") {
+              return { name: "remark-frontmatter", version: "5.0.0", options: "" };
+            }
+            return { name, version: "latest", options: "" };
+          });
       }
 
-      if (typeof data.rehypePluginsList === "string") {
-        rehypePluginsList = data.rehypePluginsList;
+      if (Array.isArray(data.rehypePlugins)) {
+        rehypePlugins = data.rehypePlugins;
+      } else if (typeof data.rehypePluginsList === "string" && data.rehypePluginsList.trim()) {
+        rehypePlugins = data.rehypePluginsList
+          .split(",")
+          .map((x: string) => x.trim())
+          .filter(Boolean)
+          .map((name: string) => ({ name, version: "latest", options: "" }));
       }
     }
 
-    this.settings = { dependencies, customCss, selectedTheme, remarkPluginsList, rehypePluginsList };
+    this.settings = { dependencies, customCss, selectedTheme, remarkPlugins, rehypePlugins };
   }
 
   async saveSettings(): Promise<void> {
